@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' blob: data:; connect-src 'self' ws:; style-src 'self' 'unsafe-inline';" />
+  <title>LANDesk</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="topbar">
+    <div class="brand">
+      <span class="dot" id="statusDot"></span>
+      <span class="logo">LANDesk</span>
+    </div>
+    <div id="tabs" class="tabs"></div>
+    <div class="topbar-right">
+      <div class="quality" id="qualityGroup" hidden>
+        <button data-q="low">Low</button>
+        <button data-q="med" class="active">Med</button>
+        <button data-q="high">High</button>
+      </div>
+      <button id="fullscreenBtn" class="ghost" hidden>⛶ Fullscreen</button>
+      <button id="disconnectBtn" class="danger" hidden>Disconnect</button>
+    </div>
+  </div>
+
+  <div id="layout">
+    <aside id="sidebar">
+      <div class="sidebar-head">
+        <h2>Devices</h2>
+        <span id="hostCount" class="badge">0</span>
+      </div>
+      <div id="deviceList" class="device-list">
+        <div class="empty" id="emptyHint">Searching the LAN…</div>
+      </div>
+      <button id="hostModeBtn" class="host-btn">+ Enable Host Mode</button>
+      <div id="selfInfo" class="self-info"></div>
+    </aside>
+
+    <main id="main">
+      <div id="placeholder" class="placeholder">
+        <div class="ph-icon">🖥️</div>
+        <p>Select a device from the left to start a live session.</p>
+        <p class="muted">All traffic stays on your local network.</p>
+      </div>
+      <div id="stage" class="stage" hidden>
+        <canvas id="screen" tabindex="0"></canvas>
+        <div id="statsOverlay" class="stats"></div>
+      </div>
+    </main>
+  </div>
+
+  <script src="streamView.js"></script>
+  <script src="inputCapture.js"></script>
+  <script src="dashboard.js"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+python-sidecar/build/
+python-sidecar/dist/
+python-sidecar/__pycache__/
+python-sidecar/*.spec
+*.log
+
+# Bundled binaries (provide locally)
+resources/ffmpeg.exe
+resources/*.ico

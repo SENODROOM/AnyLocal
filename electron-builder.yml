@@ -1,0 +1,21 @@
+appId: com.quantumlogicslabs.landesk
+productName: LANDesk
+directories:
+  output: dist
+files:
+  - main/**
+  - renderer/**
+  - resources/**
+  - package.json
+extraResources:
+  - from: python-sidecar/dist/landesk-sidecar.exe
+    to: landesk-sidecar.exe
+  - from: resources/ffmpeg.exe
+    to: ffmpeg.exe
+win:
+  target:
+    - target: portable
+      arch: [x64]
+  icon: resources/icon.ico
+portable:
+  artifactName: LANDesk-portable.exe
