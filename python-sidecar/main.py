@@ -17,6 +17,16 @@ import sys
 import threading
 import time
 
+# On Windows, stdout defaults to text mode, which translates every 0x0A byte to
+# 0x0D 0x0A. Our frames are raw binary (4-byte length prefix + JPEG), so that
+# translation corrupts the length-prefixed stream and Node can never re-assemble
+# a frame (black screen). Force the stdout fd to binary before any writes.
+if sys.platform == "win32":
+    import os
+    import msvcrt
+
+    msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
+
 import input_handler
 from capture import ScreenCapturer
 

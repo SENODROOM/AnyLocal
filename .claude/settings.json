@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -c main/main.js)",
+      "Bash(node -c main/discovery.js)",
+      "Bash(node --check renderer/dashboard.js)",
+      "Bash(py -3.13 -c \"import ast; ast.parse\\(open\\(r'c:/AnyLocal/python-sidecar/main.py'\\).read\\(\\)\\); print\\('main.py OK'\\)\")",
+      "Bash(node -c \"c:/AnyLocal/main/main.js\")",
+      "Bash(node --check \"c:/AnyLocal/renderer/dashboard.js\")",
+      "Bash(node --check \"c:/AnyLocal/renderer/streamView.js\")",
+      "Bash(node -e ' *)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\Asus\\.claude\\projects\\c--AnyLocal\\memory"
+    ]
+  }
+}

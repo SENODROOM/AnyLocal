@@ -23,6 +23,43 @@ let firewallConfigured = false;
 // Sidecar resolution: prefer the bundled .exe, fall back to running the Python
 // source directly so the app is testable in dev without a PyInstaller build.
 // ---------------------------------------------------------------------------
+// Ask the Windows "py" launcher which interpreters exist and return their tags
+// (e.g. "3.13", "3.12") EXCLUDING free-threaded builds ("3.13t"). Free-threaded
+// Python has no prebuilt binary wheels for Pillow/mss, so the sidecar's C
+// extensions fail to import there — we must never pick it. Highest version first.
+function listPythonTags() {
+  try {
+    const out = execSync('py --list', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const tags = [];
+    for (const line of out.split(/\r?\n/)) {
+      // Lines look like:  -V:3.13t *   Python 3.13 (64-bit, freethreaded)
+      const m = line.match(/-V:([0-9]+\.[0-9]+)(t?)\b/);
+      if (!m) continue;
+      if (m[2] === 't' || /freethreaded/i.test(line)) continue; // skip no-GIL builds
+      if (!tags.includes(m[1])) tags.push(m[1]);
+    }
+    tags.sort((a, b) => parseFloat(b) - parseFloat(a));
+    return tags;
+  } catch (_) {
+    return [];
+  }
+}
+
+// Build the ordered list of launch commands to try for the Python-source dev
+// fallback. Each entry is { cmd, pre } where `pre` are args before the script.
+// The caller appends the script + mode args and tries the next entry if one
+// exits immediately (e.g. a broken interpreter with missing deps).
+function pythonLaunchCommands() {
+  if (process.platform !== 'win32') {
+    return [{ cmd: 'python3', pre: [] }, { cmd: 'python', pre: [] }];
+  }
+  const cmds = [];
+  for (const tag of listPythonTags()) cmds.push({ cmd: 'py', pre: [`-${tag}`] });
+  cmds.push({ cmd: 'python', pre: [] });      // PATH python (non-freethreaded, hopefully)
+  cmds.push({ cmd: 'py', pre: ['-3'] });      // last resort: launcher default
+  return cmds;
+}
+
 function resolveSidecar() {
   const candidates = [
     path.join(process.resourcesPath || '', 'landesk-sidecar.exe'),
@@ -32,14 +69,11 @@ function resolveSidecar() {
   for (const c of candidates) {
     if (c && fs.existsSync(c)) return { type: 'exe', path: c };
   }
-  // Dev fallback: run python source. On Windows prefer the "py" launcher, then
-  // fall back to "python" (PATH). On other platforms use python3.
+  // Dev fallback: run python source, trying real (non-freethreaded) interpreters
+  // in turn until one starts and keeps running.
   const pySrc = path.join(__dirname, '..', 'python-sidecar', 'main.py');
   if (fs.existsSync(pySrc)) {
-    if (process.platform === 'win32') {
-      return { type: 'py', path: 'py', pyArgs: ['-3'], script: pySrc, altPath: 'python' };
-    }
-    return { type: 'py', path: 'python3', script: pySrc };
+    return { type: 'py', script: pySrc, commands: pythonLaunchCommands() };
   }
   return null;
 }
@@ -98,37 +132,70 @@ function enableHostMode() {
 
   configureFirewall();
 
-  const args = resolved.type === 'py'
-    ? [...(resolved.pyArgs || []), resolved.script, '--mode', 'host']
-    : ['--mode', 'host'];
+  // Ordered launch attempts. For a bundled .exe there's exactly one; for the
+  // Python-source fallback we try each real interpreter until one stays alive.
+  const attempts = resolved.type === 'py'
+    ? resolved.commands.map((c) => ({ cmd: c.cmd, args: [...c.pre, resolved.script, '--mode', 'host'] }))
+    : [{ cmd: resolved.path, args: ['--mode', 'host'] }];
 
-  let triedAlt = false;
+  let attemptIdx = 0;
+  let lastStderr = '';
 
-  // Attach stdout/stderr/exit handlers to the current `sidecar` child.
-  function wireSidecar() {
-    sidecar.stderr.on('data', (d) => console.error('[sidecar]', d.toString().trim()));
-    sidecar.on('exit', (code) => {
+  function spawnAttempt() {
+    const a = attempts[attemptIdx];
+    const startedAt = Date.now();
+    let child;
+    try {
+      child = spawn(a.cmd, a.args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (err) {
+      return handleFailure(err.message, startedAt);
+    }
+    sidecar = child;
+
+    child.stderr.on('data', (d) => {
+      const s = d.toString().trim();
+      lastStderr = s;
+      console.error('[sidecar]', s);
+    });
+
+    child.on('error', (err) => {
+      // Interpreter/executable not found — treat as a failed attempt.
+      if (sidecar !== child) return;
+      handleFailure(err.message, startedAt);
+    });
+
+    child.on('exit', (code) => {
+      if (sidecar !== child) return; // superseded by a newer attempt
       console.log('[host] sidecar exited:', code);
+      // A crash-on-startup (quick, non-zero exit) means this interpreter is
+      // missing deps or broken — advance to the next candidate.
+      const quick = Date.now() - startedAt < 4000;
+      if (code !== 0 && quick && attemptIdx + 1 < attempts.length) {
+        console.warn('[host] "%s" failed to start; trying next interpreter', a.cmd + ' ' + a.args.slice(0, 1).join(' '));
+        return handleFailure(lastStderr || `exit ${code}`, startedAt, /*advance*/ true);
+      }
       sidecar = null;
       if (hostMode) disableHostMode();
     });
-    sidecar.on('error', (err) => {
-      // If the "py" launcher is missing, retry once with plain "python".
-      if (!triedAlt && resolved.type === 'py' && resolved.altPath) {
-        triedAlt = true;
-        console.warn('[host] "%s" failed (%s); retrying with "%s"', resolved.path, err.message, resolved.altPath);
-        sidecar = spawn(resolved.altPath, [resolved.script, '--mode', 'host'], { stdio: ['pipe', 'pipe', 'pipe'] });
-        wireSidecar();
-        return;
-      }
-      console.error('[host] sidecar spawn error:', err.message);
-      if (mainWindow) mainWindow.webContents.send('host-error', err.message);
-    });
-    attachFrameParser(sidecar.stdout);
+
+    attachFrameParser(child.stdout);
   }
 
-  sidecar = spawn(resolved.path, args, { stdio: ['pipe', 'pipe', 'pipe'] });
-  wireSidecar();
+  function handleFailure(message, startedAt, forceAdvance) {
+    if (forceAdvance || attemptIdx + 1 < attempts.length) {
+      attemptIdx++;
+      if (attemptIdx < attempts.length) { spawnAttempt(); return; }
+    }
+    console.error('[host] all sidecar launch attempts failed:', message);
+    sidecar = null;
+    const hint = /_imaging|No module named|ImportError|ModuleNotFound/i.test(message)
+      ? 'Screen-capture Python deps are missing/broken. Run: py -3 -m pip install Pillow mss pynput'
+      : message;
+    if (mainWindow) mainWindow.webContents.send('host-error', hint);
+    if (hostMode) disableHostMode();
+  }
+
+  spawnAttempt();
 
   startVideoServer(VIDEO_PORT);
   startInputServer(INPUT_PORT, () => sidecar);
