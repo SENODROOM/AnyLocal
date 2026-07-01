@@ -11,3 +11,8 @@ resources/ffmpeg.exe
 resources/*.ico
 CLAUDE.md
 /CLAUDE.md
+
+# make-folder-txt
+.txtconfig
+.txtignore
+AnyLocal.txt
