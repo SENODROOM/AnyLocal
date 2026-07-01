@@ -8,7 +8,11 @@
       "Bash(node -c \"c:/AnyLocal/main/main.js\")",
       "Bash(node --check \"c:/AnyLocal/renderer/dashboard.js\")",
       "Bash(node --check \"c:/AnyLocal/renderer/streamView.js\")",
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(unset ELECTRON_RUN_AS_NODE)",
+      "Bash(\"c:/AnyLocal/node_modules/electron/dist/electron.exe\" \"c:/AnyLocal\")",
+      "Read(//c/Users/Asus/AppData/Local/Temp/**)",
+      "Bash(taskkill //IM electron.exe //F)"
     ],
     "additionalDirectories": [
       "c:\\Users\\Asus\\.claude\\projects\\c--AnyLocal\\memory"

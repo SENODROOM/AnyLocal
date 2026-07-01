@@ -21,12 +21,30 @@ window.LANDesk = window.LANDesk || {};
   const qualityGroup  = document.getElementById('qualityGroup');
   const fullscreenBtn = document.getElementById('fullscreenBtn');
   const disconnectBtn = document.getElementById('disconnectBtn');
+  const controlBanner = document.getElementById('controlBanner');
+  const stopControlBtn = document.getElementById('stopControlBtn');
+
+  // ------------------------------------------------- "being controlled" banner
+  function showControlBanner(from) {
+    if (!controlBanner) return;
+    const nameEl = controlBanner.querySelector('.cb-name');
+    if (nameEl) nameEl.textContent = from && from.name ? from.name : 'Someone';
+    controlBanner.hidden = false;
+  }
+  function hideControlBanner() { if (controlBanner) controlBanner.hidden = true; }
+  if (stopControlBtn) {
+    stopControlBtn.addEventListener('click', () => ipcRenderer.invoke('end-session'));
+  }
 
   const hosts       = new Map();  // key -> host
   const openTabs    = new Map();  // key -> host (live sessions)
   const pendingReqs = new Set();  // keys where we sent a request and are waiting
   let activeKey      = null;
   let currentQuality = 'med';
+
+  // Our exclusive-session role, mirrored from the main process.
+  let myRole = 'idle';            // 'idle' | 'controller' | 'host'
+  let myPeer = null;
 
   const OS_ICON = { win32: '🪟', darwin: '🍎', linux: '🐧' };
   const OS_NAME = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' };
@@ -94,42 +112,55 @@ window.LANDesk = window.LANDesk || {};
   function syncCardState(card, host) {
     const isConnected = openTabs.has(host.key);
     const isPending   = pendingReqs.has(host.key);
+    // A peer that is hosting/busy with someone else (not us) is unavailable.
+    const isBusyElsewhere = (host.busy || host.hostReady) && !isConnected && !isPending;
 
     card.classList.toggle('connected', isConnected);
     card.classList.toggle('pending',   isPending);
+    card.classList.toggle('busy',      isBusyElsewhere);
 
     const pill = card.querySelector('.connect-pill');
+    const dot  = card.querySelector('.ping-dot');
+    const txt  = card.querySelector('.ping-val');
     if (!pill) return;
 
     if (isConnected) {
-      pill.textContent  = '● Connected';
+      pill.textContent  = '● Controlling';
       pill.dataset.kind = 'active';
+      if (dot) dot.style.visibility = 'hidden';
+      if (txt) txt.textContent = 'live';
     } else if (isPending) {
       pill.textContent  = '◌ Connecting…';
       pill.dataset.kind = 'pending';
+      if (dot) dot.style.visibility = 'hidden';
+      if (txt) txt.textContent = 'requesting';
+    } else if (isBusyElsewhere) {
+      pill.textContent  = 'In use';
+      pill.dataset.kind = 'busy';
+      if (dot) dot.style.visibility = 'hidden';
+      if (txt) txt.textContent = 'busy';
     } else {
       pill.textContent  = 'Connect →';
       pill.dataset.kind = 'connect';
-      if (host.hostReady) {
-        updateCardLatency(card, host.latency ?? null);
-      } else {
-        const dot = card.querySelector('.ping-dot');
-        const txt = card.querySelector('.ping-val');
-        if (dot) dot.style.visibility = 'hidden';
-        if (txt) txt.textContent = 'ready';
-      }
+      if (dot) dot.style.visibility = 'hidden';
+      if (txt) txt.textContent = 'ready';
     }
   }
 
   function handleCardClick(host) {
     if (openTabs.has(host.key) || pendingReqs.has(host.key)) return;
-    if (host.hostReady) {
-      openSession(host);
-    } else {
-      // Ask the peer to share its screen. It auto-accepts and we open the
-      // stream when the accept arrives (see 'connect-accepted' below).
-      sendConnectRequest(host);
+    if (myRole !== 'idle') {
+      showStatusToast('Disconnect your current session first', 'warn');
+      return;
     }
+    // hostReady / busy both mean the peer is already in a session with someone.
+    if (host.busy || host.hostReady) {
+      showStatusToast(`${host.name} is busy in another session`, 'warn');
+      return;
+    }
+    // Ask the peer to share its screen. It accepts (if idle) and we open the
+    // stream when the accept arrives (see 'connect-accepted' below).
+    sendConnectRequest(host);
   }
 
   function updateCardLatency(card, val) {
@@ -150,20 +181,51 @@ window.LANDesk = window.LANDesk || {};
   function sendConnectRequest(host) {
     pendingReqs.add(host.key);
     renderDeviceList();
-    ipcRenderer.invoke('request-connect', host);
+    ipcRenderer.invoke('request-connect', host).then((res) => {
+      if (res && res.ok === false) {
+        pendingReqs.delete(host.key);
+        renderDeviceList();
+        showStatusToast(res.error || 'Cannot connect right now', 'warn');
+      }
+    });
     // Auto-cancel if no response within 20 s.
     setTimeout(() => {
       if (pendingReqs.has(host.key)) {
         pendingReqs.delete(host.key);
+        ipcRenderer.invoke('end-session'); // release the tentative controller claim
         renderDeviceList();
         showStatusToast(`${host.name} did not respond`, 'warn');
       }
     }, 20000);
   }
 
-  // Someone connected to THIS pc (auto-accepted). Just let the user know.
-  ipcRenderer.on('incoming-connection', (_e, fromInfo) => {
-    showStatusToast(`${escapeHtml(fromInfo.name)} connected to this PC`, 'info');
+  // Mirror the main-process session role so the UI knows whether we're free,
+  // controlling, or being controlled.
+  ipcRenderer.on('session-state', (_e, { role, peer }) => {
+    myRole = role;
+    myPeer = peer;
+    statusDot.classList.toggle('host', role === 'host');
+    if (role !== 'host') hideControlBanner();
+    renderDeviceList();
+  });
+
+  // Someone started controlling THIS pc — show the lock banner + Stop control.
+  ipcRenderer.on('being-controlled', (_e, fromInfo) => {
+    showControlBanner(fromInfo);
+    showStatusToast(`${escapeHtml(fromInfo.name)} is now controlling this PC`, 'info');
+  });
+
+  // The peer ended the session (they disconnected, or their host crashed).
+  ipcRenderer.on('session-ended', (_e, { peer, role }) => {
+    hideControlBanner();
+    if (!peer) return;
+    if (role === 'controller') {
+      const h = Array.from(hosts.values()).find((x) => x.address === peer.address);
+      if (h && openTabs.has(h.key)) teardownSessionUI(h.key);
+      showStatusToast(`${escapeHtml(peer.name)} stopped sharing`, 'info');
+    } else {
+      showStatusToast(`${escapeHtml(peer.name)} disconnected`, 'info');
+    }
   });
 
   // Our request was accepted — open the stream automatically.
@@ -189,7 +251,12 @@ window.LANDesk = window.LANDesk || {};
       if (h && h.address === info.address) { pendingReqs.delete(key); break; }
     }
     renderDeviceList();
-    showStatusToast(`${escapeHtml(info.name)} declined the request`, 'danger');
+    const msg = info.reason === 'busy'
+      ? `${escapeHtml(info.name)} is busy in another session`
+      : info.reason === 'error'
+        ? `${escapeHtml(info.name)} could not start screen sharing`
+        : `${escapeHtml(info.name)} declined the request`;
+    showStatusToast(msg, info.reason === 'busy' ? 'warn' : 'danger');
   });
 
   function showStatusToast(message, type = 'info') {
@@ -255,7 +322,8 @@ window.LANDesk = window.LANDesk || {};
     renderTabs();
   }
 
-  function closeSession(key) {
+  // UI-only teardown (used when the peer ended the session).
+  function teardownSessionUI(key) {
     openTabs.delete(key);
     if (activeKey === key) {
       LANDesk.stream.disconnect();
@@ -270,6 +338,14 @@ window.LANDesk = window.LANDesk || {};
     }
     renderTabs();
     renderDeviceList();
+  }
+
+  // User-initiated disconnect: tear down and tell main to end the session so
+  // the peer stops sharing / is released.
+  function closeSession(key) {
+    const existed = openTabs.has(key);
+    teardownSessionUI(key);
+    if (existed) ipcRenderer.invoke('end-session');
   }
 
   function showPlaceholder() {
@@ -300,12 +376,8 @@ window.LANDesk = window.LANDesk || {};
   });
 
   // ----------------------------------------------------------------- host state
-  // Host mode is now enabled automatically when a peer connects to us; there is
-  // no manual toggle. We only reflect the state in the status dot.
-  ipcRenderer.on('host-state', (_e, { hostMode }) => {
-    statusDot.classList.toggle('host', hostMode && !LANDesk.stream.connected);
-  });
-
+  // The status dot's host/controller state is driven by 'session-state' above;
+  // 'host-state' is left unhandled to avoid fighting over the same indicator.
   ipcRenderer.on('host-error', (_e, msg) => showStatusToast('Host error: ' + msg, 'danger'));
 
   // ----------------------------------------------------------------- discovery

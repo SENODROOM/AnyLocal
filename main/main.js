@@ -17,7 +17,44 @@ let mainWindow = null;
 let tray = null;
 let sidecar = null;
 let hostMode = false;
+let hostStopping = false;   // true while we deliberately tear the sidecar down
 let firewallConfigured = false;
+
+// -------------------------------------------------------------------------
+// Exclusive 1:1 session state (AnyDesk-style). A machine is either:
+//   'idle'       — free to connect or be connected to
+//   'controller' — actively controlling `peer`
+//   'host'       — being controlled by `peer`
+// Whoever clicks Connect first wins; the other side is told the peer is busy.
+// -------------------------------------------------------------------------
+let session = { role: 'idle', peer: null, pending: false };
+
+function setSession(role, peer) {
+  session = { role, peer: peer || null, pending: false };
+  discovery.setBusy(role !== 'idle');
+  if (mainWindow) mainWindow.webContents.send('session-state', { role, peer: peer || null });
+  updateTrayMenu();
+}
+
+// Local user (or a timed-out request) ends the session cleanly.
+function endSession(notifyPeer) {
+  if (session.role === 'idle') return;
+  const s = session;
+  setSession('idle', null);                     // flip first so teardown paths no-op
+  if (notifyPeer && s.peer) {
+    discovery.sendConnectBye(s.peer.address, { name: os.hostname() });
+  }
+  if (s.role === 'host') disableHostMode();
+}
+
+// The host side lost its sidecar unexpectedly (crash): tell the controller.
+function teardownHostSession(reason) {
+  if (session.role !== 'host') return;
+  const peer = session.peer;
+  if (peer) discovery.sendConnectBye(peer.address, { name: os.hostname() });
+  setSession('idle', null);
+  if (mainWindow) mainWindow.webContents.send('session-ended', { peer, role: 'host', reason });
+}
 
 // ---------------------------------------------------------------------------
 // Sidecar resolution: prefer the bundled .exe, fall back to running the Python
@@ -121,6 +158,7 @@ function configureFirewall() {
 // ---------------------------------------------------------------------------
 function enableHostMode() {
   if (hostMode) return { ok: true, already: true };
+  hostStopping = false;
 
   const resolved = resolveSidecar();
   if (!resolved) {
@@ -167,6 +205,8 @@ function enableHostMode() {
     child.on('exit', (code) => {
       if (sidecar !== child) return; // superseded by a newer attempt
       console.log('[host] sidecar exited:', code);
+      // A deliberate teardown (disableHostMode) — don't try to "recover".
+      if (hostStopping) { sidecar = null; return; }
       // A crash-on-startup (quick, non-zero exit) means this interpreter is
       // missing deps or broken — advance to the next candidate.
       const quick = Date.now() - startedAt < 4000;
@@ -174,8 +214,10 @@ function enableHostMode() {
         console.warn('[host] "%s" failed to start; trying next interpreter', a.cmd + ' ' + a.args.slice(0, 1).join(' '));
         return handleFailure(lastStderr || `exit ${code}`, startedAt, /*advance*/ true);
       }
+      // Unexpected crash while hosting — drop host mode and end the session.
       sidecar = null;
       if (hostMode) disableHostMode();
+      teardownHostSession('crash');
     });
 
     attachFrameParser(child.stdout);
@@ -193,6 +235,7 @@ function enableHostMode() {
       : message;
     if (mainWindow) mainWindow.webContents.send('host-error', hint);
     if (hostMode) disableHostMode();
+    teardownHostSession('error');
   }
 
   spawnAttempt();
@@ -209,6 +252,7 @@ function enableHostMode() {
 }
 
 function disableHostMode() {
+  hostStopping = true;
   hostMode = false;
   discovery.setHostReady(false);
   stopVideoServer();
@@ -293,31 +337,55 @@ function wireIpc() {
   }));
 
   // P2P direct-connect signalling ----------------------------------------
-  // Controller asks a peer to share its screen. The peer auto-accepts (see
-  // autoAcceptConnect) and streams back — no interaction needed on that side.
+  // The controller asks a peer to share its screen. Exclusive: refused locally
+  // if we're already in a session (so we can't control two peers at once).
   ipcMain.handle('request-connect', (_e, host) => {
+    if (session.role !== 'idle') {
+      return { ok: false, error: 'You are already in a session. Disconnect first.' };
+    }
+    // Claim controller role immediately so a simultaneous incoming request from
+    // the same peer is refused — whoever clicked first wins.
+    setSession('controller', { name: host.name, address: host.address });
+    session.pending = true;
     discovery.sendConnectRequest(host.address, { name: os.hostname(), os: process.platform });
     return { ok: true };
   });
+
+  // Local user disconnected (or the request timed out): end the session and
+  // notify the peer so it stops sharing / releases control.
+  ipcMain.handle('end-session', () => { endSession(true); return { ok: true }; });
 }
 
-// Auto-accept an incoming connect request: enable host mode (if not already),
-// let the sidecar warm up, then tell the requester to open the stream.
-function autoAcceptConnect(fromInfo) {
-  const res = enableHostMode();
-  if (!res.ok) {
-    console.error('[host] auto-accept failed to enable host mode:', res.error);
+// An incoming connect request. If we're free, become the HOST for that peer:
+// start sharing our screen + accept its input. If we're busy, deny with 'busy'
+// so the first-clicker keeps exclusive control.
+function handleIncomingRequest(fromInfo) {
+  if (session.role !== 'idle') {
+    discovery.sendConnectDeny(fromInfo.address, { name: os.hostname(), reason: 'busy' });
     return;
   }
-  // Let the requester's UI show who just connected to them.
-  if (mainWindow) mainWindow.webContents.send('incoming-connection', fromInfo);
+  setSession('host', { name: fromInfo.name, address: fromInfo.address });
+
+  const res = enableHostMode();
+  if (!res.ok) {
+    discovery.sendConnectDeny(fromInfo.address, { name: os.hostname(), reason: 'error' });
+    setSession('idle', null);
+    return;
+  }
+
+  // Show the "you are being controlled" banner on this machine.
+  if (mainWindow) mainWindow.webContents.send('being-controlled', fromInfo);
+
   // Give the sidecar a moment to open its capture loop before the stream opens.
   setTimeout(() => {
-    discovery.sendConnectAccept(fromInfo.address, {
-      name: os.hostname(),
-      videoPort: VIDEO_PORT,
-      inputPort: INPUT_PORT,
-    });
+    // Guard: the session may have ended during warmup.
+    if (session.role === 'host' && session.peer && session.peer.address === fromInfo.address) {
+      discovery.sendConnectAccept(fromInfo.address, {
+        name: os.hostname(),
+        videoPort: VIDEO_PORT,
+        inputPort: INPUT_PORT,
+      });
+    }
   }, res.already ? 0 : 500);
 }
 
@@ -342,14 +410,33 @@ if (!singleInstance) {
     discovery.startBroadcasting({ name: os.hostname() });
 
     // Wire up P2P signalling callbacks before starting the listener.
-    // Incoming connect requests are AUTO-ACCEPTED: the app silently enables host
-    // mode and streams back. No prompt on the target machine — connecting is a
-    // single click on the controller. (LAN-only; non-private IPs are rejected by
-    // lanGuard on the WebSocket upgrade.)
+    // Incoming requests are auto-accepted ONLY when this machine is idle; if it
+    // is already in a session the request is denied 'busy' so the first-clicker
+    // keeps exclusive control. (LAN-only; non-private IPs rejected by lanGuard.)
     discovery.setRequestHandlers(
-      (from) => { autoAcceptConnect(from); },
-      (from) => { if (mainWindow) mainWindow.webContents.send('connect-accepted', from); },
-      (from) => { if (mainWindow) mainWindow.webContents.send('connect-denied',   from); }
+      // onRequest
+      (from) => { handleIncomingRequest(from); },
+      // onAccept — our outbound request succeeded; open the stream as controller.
+      (from) => {
+        if (session.role !== 'controller' || !session.peer || session.peer.address !== from.address) return;
+        session.pending = false;
+        if (mainWindow) mainWindow.webContents.send('connect-accepted', from);
+      },
+      // onDeny — peer refused (busy / error / declined).
+      (from) => {
+        if (session.role === 'controller' && session.peer && session.peer.address === from.address) {
+          setSession('idle', null);
+        }
+        if (mainWindow) mainWindow.webContents.send('connect-denied', from);
+      },
+      // onBye — the other side ended the session; tear down and go idle.
+      (from) => {
+        if (!session.peer || session.peer.address !== from.address) return;
+        const role = session.role;
+        if (role === 'host') disableHostMode();
+        setSession('idle', null);
+        if (mainWindow) mainWindow.webContents.send('session-ended', { peer: from, role });
+      }
     );
 
     // Controller mode: listen for peer/host beacons and signalling.
@@ -369,6 +456,7 @@ if (!singleInstance) {
 
   app.on('before-quit', () => {
     app.isQuitting = true;
+    endSession(true);        // tell the peer we're leaving
     disableHostMode();
     discovery.stopListening();
   });

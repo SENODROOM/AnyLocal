@@ -23,19 +23,27 @@ const MSG_BEACON  = 'LANDesk-Host';
 const MSG_REQUEST = 'LANDesk-Request';
 const MSG_ACCEPT  = 'LANDesk-Accept';
 const MSG_DENY    = 'LANDesk-Deny';
+const MSG_BYE     = 'LANDesk-Bye';
 
 let broadcastSocket = null;
 let broadcastTimer  = null;
 let listenSocket    = null;
 let expiryTimer     = null;
 
-// Dynamic portion of the beacon — mutated by setHostReady().
-let _broadcastExtra = { hostReady: false };
+// Dynamic portion of the beacon. `hostReady` = actively sharing (with ports);
+// `busy` = already in a 1:1 control session so it can't be connected to.
+let _state = { hostReady: false, busy: false, port: undefined, inputPort: undefined };
+function buildExtra() {
+  const e = { hostReady: _state.hostReady, busy: _state.busy };
+  if (_state.hostReady) { e.port = _state.port; e.inputPort = _state.inputPort; }
+  return e;
+}
 
-// P2P request callbacks set by setRequestHandlers().
+// P2P signalling callbacks set by setRequestHandlers().
 let _onRequest = null;
 let _onAccept  = null;
 let _onDeny    = null;
+let _onBye     = null;
 
 // Map<string key, hostInfo>
 const hosts = new Map();
@@ -64,7 +72,7 @@ function startBroadcasting(opts = {}) {
   broadcastSocket.bind(() => {
     broadcastSocket.setBroadcast(true);
     const send = () => {
-      const buf = Buffer.from(JSON.stringify({ ...basePayload, ..._broadcastExtra }));
+      const buf = Buffer.from(JSON.stringify({ ...basePayload, ...buildExtra() }));
       broadcastSocket.send(buf, 0, buf.length, DISCOVERY_PORT, BROADCAST_ADDR, (err) => {
         if (err) console.error('[discovery] send failed:', err.message);
       });
@@ -78,11 +86,15 @@ function startBroadcasting(opts = {}) {
 
 // Called by main.js when Host Mode is toggled.
 function setHostReady(ready, videoPort, inputPort) {
-  if (ready) {
-    _broadcastExtra = { hostReady: true, port: videoPort, inputPort };
-  } else {
-    _broadcastExtra = { hostReady: false };
-  }
+  _state.hostReady = !!ready;
+  _state.port = ready ? videoPort : undefined;
+  _state.inputPort = ready ? inputPort : undefined;
+}
+
+// Called by main.js when this machine enters/leaves a 1:1 control session so
+// other peers show it as unavailable.
+function setBusy(busy) {
+  _state.busy = !!busy;
 }
 
 function stopBroadcasting() {
@@ -118,14 +130,20 @@ function sendConnectAccept(targetAddress, selfInfo) {
 }
 
 function sendConnectDeny(targetAddress, selfInfo) {
-  sendUnicast(targetAddress, { type: MSG_DENY, from: selfInfo.name });
+  sendUnicast(targetAddress, { type: MSG_DENY, from: selfInfo.name, reason: selfInfo.reason || 'declined' });
+}
+
+// End a live session — tells the other side to tear down cleanly and go idle.
+function sendConnectBye(targetAddress, selfInfo) {
+  sendUnicast(targetAddress, { type: MSG_BYE, from: selfInfo.name });
 }
 
 // Register callbacks for incoming signalling messages.
-function setRequestHandlers(onRequest, onAccept, onDeny) {
+function setRequestHandlers(onRequest, onAccept, onDeny, onBye) {
   _onRequest = onRequest;
   _onAccept  = onAccept;
   _onDeny    = onDeny;
+  _onBye     = onBye;
 }
 
 // ---- Listen --------------------------------------------------------------
@@ -164,7 +182,13 @@ function startListening(onHost, onLost) {
     }
     if (data.type === MSG_DENY) {
       if (typeof _onDeny === 'function') {
-        _onDeny({ name: data.from, address: rinfo.address });
+        _onDeny({ name: data.from, address: rinfo.address, reason: data.reason || 'declined' });
+      }
+      return;
+    }
+    if (data.type === MSG_BYE) {
+      if (typeof _onBye === 'function') {
+        _onBye({ name: data.from, address: rinfo.address });
       }
       return;
     }
@@ -182,6 +206,7 @@ function startListening(onHost, onLost) {
       inputPort: data.inputPort || 8766,
       os: data.os || 'unknown',
       hostReady: !!data.hostReady,
+      busy: !!data.busy,
       lastSeen: Date.now(),
     };
     hosts.set(key, host);
@@ -221,12 +246,14 @@ module.exports = {
   startBroadcasting,
   stopBroadcasting,
   setHostReady,
+  setBusy,
   startListening,
   stopListening,
   setRequestHandlers,
   sendConnectRequest,
   sendConnectAccept,
   sendConnectDeny,
+  sendConnectBye,
   getHosts,
   DISCOVERY_PORT,
 };

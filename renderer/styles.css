@@ -308,6 +308,14 @@ button.danger:hover { background: var(--danger-dim); border-color: var(--danger)
 }
 .card.pending::before { background: var(--accent); animation: shimmer 1.4s ease-in-out infinite; }
 
+/* Peer already in a session with someone else — not connectable */
+.card.busy {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.card.busy::before { background: var(--warn); }
+.card.busy:hover { transform: none; box-shadow: none; border-color: var(--border-soft); }
+
 .card-row { display: flex; align-items: center; justify-content: space-between; }
 .card-name {
   font-weight: 600; font-size: 13.5px;
@@ -356,6 +364,7 @@ button.danger:hover { background: var(--danger-dim); border-color: var(--danger)
 .card:hover .connect-pill[data-kind="request"] { background: rgba(234, 179, 8, 0.2); border-color: rgba(234, 179, 8, 0.5); }
 .connect-pill[data-kind="pending"] { color: var(--accent-hi); background: rgba(59, 130, 246, 0.1); font-style: normal; }
 .connect-pill[data-kind="active"]  { color: var(--ok); background: var(--ok-dim); }
+.connect-pill[data-kind="busy"]    { color: var(--warn); background: rgba(234, 179, 8, 0.1); }
 
 /* ---- Sidebar footer (self status) ---- */
 .sidebar-footer {
@@ -533,3 +542,33 @@ button.danger:hover { background: var(--danger-dim); border-color: var(--danger)
 .toast-status.toast-warn::before   { background: var(--warn); }
 .toast-status.toast-danger { color: #fca5a5; }
 .toast-status.toast-danger::before { background: var(--danger); }
+
+/* ==================================================================== */
+/* "Being controlled" banner                                            */
+/* ==================================================================== */
+.control-banner {
+  position: fixed;
+  top: calc(var(--topbar-h) + 14px);
+  left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px 10px 16px;
+  background: linear-gradient(180deg, #2a1e12, #1c1610);
+  border: 1px solid rgba(234, 179, 8, 0.5);
+  border-radius: 999px;
+  box-shadow: var(--shadow-pop), 0 0 0 1px rgba(234, 179, 8, 0.15);
+  z-index: 1200;
+  animation: toast-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+.cb-lock { font-size: 15px; line-height: 1; }
+.cb-text { font-size: 13px; color: #fde68a; font-weight: 500; }
+.cb-text .cb-name { color: #fff; font-weight: 700; }
+.cb-stop {
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  background: var(--danger-dim);
+  color: #fca5a5;
+  font-size: 12px; font-weight: 700;
+  padding: 6px 13px; border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.cb-stop:hover { background: rgba(239, 68, 68, 0.28); color: #fff; border-color: var(--danger); }
