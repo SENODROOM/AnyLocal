@@ -314,7 +314,17 @@ window.LANDesk = window.LANDesk || {};
     LANDesk.stream.connect(
       host,
       () => { statusDot.classList.add('live'); LANDesk.input.sendConfig(currentQuality); },
-      () => { statusDot.classList.remove('live'); }
+      () => {
+        // Unexpected close (deliberate disconnects null the handler first):
+        // the host stopped sharing or dropped — tear the session down instead
+        // of sitting on a dead "waiting for video" screen forever.
+        statusDot.classList.remove('live');
+        if (openTabs.has(host.key)) {
+          teardownSessionUI(host.key);
+          ipcRenderer.invoke('end-session');
+          showStatusToast(`Session with ${host.name} ended`, 'info');
+        }
+      }
     );
     LANDesk.input.connect(host);
     LANDesk.stream.canvas.focus();
@@ -382,12 +392,10 @@ window.LANDesk = window.LANDesk || {};
 
   // ----------------------------------------------------------------- discovery
   ipcRenderer.on('host-found', (_e, host) => {
-    const wasNew = !hosts.has(host.key);
     const prev = hosts.get(host.key);
     if (prev) host.latency = prev.latency;
     hosts.set(host.key, host);
     renderDeviceList();
-    if (wasNew && host.hostReady) pingHost(host);
   });
 
   ipcRenderer.on('host-lost', (_e, host) => {
@@ -395,7 +403,11 @@ window.LANDesk = window.LANDesk || {};
     renderDeviceList();
   });
 
-  setInterval(() => { for (const h of hosts.values()) if (h.hostReady) pingHost(h); }, 5000);
+  // Only probe the host we are actually connected to — the input server of a
+  // busy peer refuses foreign sockets now, so blind probes would read "offline".
+  setInterval(() => {
+    for (const h of hosts.values()) if (openTabs.has(h.key)) pingHost(h);
+  }, 5000);
 
   // ----------------------------------------------------------------- util
   function escapeHtml(s) {
@@ -412,7 +424,7 @@ window.LANDesk = window.LANDesk || {};
     } catch (_) {}
     try {
       const existing = await ipcRenderer.invoke('get-hosts');
-      for (const h of existing) { hosts.set(h.key, h); if (h.hostReady) pingHost(h); }
+      for (const h of existing) hosts.set(h.key, h);
       renderDeviceList();
     } catch (_) {}
   })();

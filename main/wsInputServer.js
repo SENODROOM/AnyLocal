@@ -10,13 +10,19 @@ const { guard } = require('./lanGuard');
 let wss = null;
 
 // getSidecar(): returns the live child_process for the running host sidecar (or null)
-function startInputServer(port = 8766, getSidecar) {
+function startInputServer(port = 8766, getSidecar, opts = {}) {
   if (wss) return wss;
 
   wss = new WebSocketServer({ port });
 
   wss.on('connection', (ws, req) => {
     if (!guard(req, ws)) return;
+    // Exclusive session: only the current session peer may inject input.
+    if (typeof opts.allowFrom === 'function' && !opts.allowFrom(req.socket.remoteAddress)) {
+      console.log('[input] refused non-session client:', req.socket.remoteAddress);
+      try { ws.close(4003, 'busy'); } catch (_) { ws.terminate(); }
+      return;
+    }
     console.log('[input] client connected:', req.socket.remoteAddress);
 
     ws.on('message', (data) => {
@@ -47,6 +53,11 @@ function startInputServer(port = 8766, getSidecar) {
 
 function stopInputServer() {
   if (wss) {
+    // Kill existing clients too — otherwise a controller keeps an open input
+    // pipe after Stop control and mouse/keyboard injection appears to continue.
+    for (const c of wss.clients) {
+      try { c.terminate(); } catch (_) {}
+    }
     try { wss.close(); } catch (_) {}
   }
   wss = null;

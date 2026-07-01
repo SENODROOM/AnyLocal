@@ -65,6 +65,10 @@ LANDesk.stream = (function () {
         remoteH = img.naturalHeight;
         canvas.width = remoteW;
         canvas.height = remoteH;
+        // Resizing the canvas resets context state — re-apply quality prefs so
+        // the CSS-scaled image stays as sharp as the browser can make it.
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
         if (typeof onResolution === 'function') onResolution(remoteW, remoteH);
       }
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);

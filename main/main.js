@@ -7,8 +7,14 @@ const os = require('os');
 const { spawn, execSync } = require('child_process');
 
 const discovery = require('./discovery');
-const { startVideoServer, broadcastFrame, stopVideoServer } = require('./wsVideoServer');
+const { startVideoServer, broadcastFrame, stopVideoServer, countClients } = require('./wsVideoServer');
 const { startInputServer, stopInputServer } = require('./wsInputServer');
+
+// Node reports LAN peers as IPv6-mapped IPv4 ("::ffff:192.168.1.5") on the WS
+// side, while UDP discovery reports plain IPv4 — normalize before comparing.
+function normIp(addr) {
+  return String(addr || '').replace(/^::ffff:/i, '');
+}
 
 const VIDEO_PORT = 8765;
 const INPUT_PORT = 8766;
@@ -28,12 +34,44 @@ let firewallConfigured = false;
 // Whoever clicks Connect first wins; the other side is told the peer is busy.
 // -------------------------------------------------------------------------
 let session = { role: 'idle', peer: null, pending: false };
+let detachTimer = null;       // fires when the controller's video socket is gone
 
 function setSession(role, peer) {
   session = { role, peer: peer || null, pending: false };
+  clearTimeout(detachTimer);
+  detachTimer = null;
   discovery.setBusy(role !== 'idle');
   if (mainWindow) mainWindow.webContents.send('session-state', { role, peer: peer || null });
   updateTrayMenu();
+}
+
+// While hosting, only the session peer may attach to the video/input servers.
+// Outside a session (manual tray host mode) any LAN client is allowed.
+function sessionAllows(remoteAddr) {
+  if (session.role !== 'host' || !session.peer) return true;
+  return normIp(remoteAddr) === normIp(session.peer.address);
+}
+
+// The controller's *actual* video connection drives the truth on the host:
+// attach → show the "being controlled" banner; detach (with a short grace for
+// reconnects) → the session is over, stop sharing.
+function onControllerCount(n) {
+  if (session.role !== 'host') return;
+  if (n > 0) {
+    clearTimeout(detachTimer);
+    detachTimer = null;
+    if (mainWindow) mainWindow.webContents.send('being-controlled', session.peer);
+  } else {
+    clearTimeout(detachTimer);
+    detachTimer = setTimeout(() => {
+      if (session.role === 'host' && countClients() === 0) {
+        const peer = session.peer;
+        console.log('[session] controller detached — ending host session');
+        endSession(false);
+        if (mainWindow) mainWindow.webContents.send('session-ended', { peer, role: 'host', reason: 'detached' });
+      }
+    }, 4000);
+  }
 }
 
 // Local user (or a timed-out request) ends the session cleanly.
@@ -240,8 +278,11 @@ function enableHostMode() {
 
   spawnAttempt();
 
-  startVideoServer(VIDEO_PORT);
-  startInputServer(INPUT_PORT, () => sidecar);
+  startVideoServer(VIDEO_PORT, {
+    allowFrom: sessionAllows,
+    onClientCount: onControllerCount,
+  });
+  startInputServer(INPUT_PORT, () => sidecar, { allowFrom: sessionAllows });
   discovery.setHostReady(true, VIDEO_PORT, INPUT_PORT);
 
   hostMode = true;
@@ -339,7 +380,13 @@ function wireIpc() {
   // P2P direct-connect signalling ----------------------------------------
   // The controller asks a peer to share its screen. Exclusive: refused locally
   // if we're already in a session (so we can't control two peers at once).
+  // The REQUEST is re-sent every 2 s while pending — UDP on Wi-Fi drops packets,
+  // and a single lost message must not wedge the connect flow.
   ipcMain.handle('request-connect', (_e, host) => {
+    if (session.role === 'controller' && session.peer && session.peer.address === host.address) {
+      discovery.sendConnectRequest(host.address, { name: os.hostname(), os: process.platform });
+      return { ok: true };
+    }
     if (session.role !== 'idle') {
       return { ok: false, error: 'You are already in a session. Disconnect first.' };
     }
@@ -347,19 +394,46 @@ function wireIpc() {
     // the same peer is refused — whoever clicked first wins.
     setSession('controller', { name: host.name, address: host.address });
     session.pending = true;
-    discovery.sendConnectRequest(host.address, { name: os.hostname(), os: process.platform });
+
+    const sendReq = () =>
+      discovery.sendConnectRequest(host.address, { name: os.hostname(), os: process.platform });
+    sendReq();
+    let tries = 0;
+    const retry = setInterval(() => {
+      const stillPending =
+        session.role === 'controller' && session.pending &&
+        session.peer && session.peer.address === host.address;
+      if (!stillPending || ++tries >= 8) { clearInterval(retry); return; }
+      sendReq();
+    }, 2000);
     return { ok: true };
   });
 
   // Local user disconnected (or the request timed out): end the session and
-  // notify the peer so it stops sharing / releases control.
-  ipcMain.handle('end-session', () => { endSession(true); return { ok: true }; });
+  // notify the peer so it stops sharing / releases control. Always re-sync the
+  // renderer's session state, even if we were already idle — this guarantees a
+  // stuck banner or stale role in the UI gets cleared by the Stop button.
+  ipcMain.handle('end-session', () => {
+    endSession(true);
+    if (mainWindow) mainWindow.webContents.send('session-state', { role: session.role, peer: session.peer });
+    return { ok: true };
+  });
 }
 
 // An incoming connect request. If we're free, become the HOST for that peer:
 // start sharing our screen + accept its input. If we're busy, deny with 'busy'
 // so the first-clicker keeps exclusive control.
 function handleIncomingRequest(fromInfo) {
+  console.log('[p2p] connect request from', fromInfo.name, fromInfo.address);
+
+  // Retry from the controller we're already hosting for (its ACCEPT was likely
+  // lost, or it re-clicked) — just accept again, don't treat it as a conflict.
+  if (session.role === 'host' && session.peer && normIp(session.peer.address) === normIp(fromInfo.address)) {
+    discovery.sendConnectAccept(fromInfo.address, {
+      name: os.hostname(), videoPort: VIDEO_PORT, inputPort: INPUT_PORT,
+    });
+    return;
+  }
   if (session.role !== 'idle') {
     discovery.sendConnectDeny(fromInfo.address, { name: os.hostname(), reason: 'busy' });
     return;
@@ -373,8 +447,18 @@ function handleIncomingRequest(fromInfo) {
     return;
   }
 
-  // Show the "you are being controlled" banner on this machine.
-  if (mainWindow) mainWindow.webContents.send('being-controlled', fromInfo);
+  // NOTE: the "being controlled" banner is NOT shown here. It is driven by the
+  // controller's actual video connection (onControllerCount), so it can never
+  // appear on a machine that isn't really being watched.
+
+  // If the controller never attaches (app closed, network died), don't stay
+  // locked as a busy host forever.
+  detachTimer = setTimeout(() => {
+    if (session.role === 'host' && countClients() === 0) {
+      console.log('[session] controller never attached — ending host session');
+      endSession(true);
+    }
+  }, 15000);
 
   // Give the sidecar a moment to open its capture loop before the stream opens.
   setTimeout(() => {

@@ -17,6 +17,13 @@ function startVideoServer(port = 8765, opts = {}) {
 
   wss.on('connection', (ws, req) => {
     if (!guard(req, ws)) return;
+    // Exclusive session: while hosting for a specific peer, only that peer may
+    // attach. Anyone else is refused so a session can never be hijacked/crossed.
+    if (typeof opts.allowFrom === 'function' && !opts.allowFrom(req.socket.remoteAddress)) {
+      console.log('[video] refused non-session client:', req.socket.remoteAddress);
+      try { ws.close(4003, 'busy'); } catch (_) { ws.terminate(); }
+      return;
+    }
     console.log('[video] client connected:', req.socket.remoteAddress);
 
     if (typeof opts.onClientCount === 'function') {
@@ -58,6 +65,11 @@ function broadcastFrame(frame) {
 
 function stopVideoServer() {
   if (wss) {
+    // wss.close() alone leaves existing client sockets open, which would let a
+    // controller sit on "waiting for video" forever after we stop hosting.
+    for (const c of wss.clients) {
+      try { c.terminate(); } catch (_) {}
+    }
     try { wss.close(); } catch (_) {}
   }
   wss = null;

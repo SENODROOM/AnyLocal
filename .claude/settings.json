@@ -12,7 +12,10 @@
       "Bash(unset ELECTRON_RUN_AS_NODE)",
       "Bash(\"c:/AnyLocal/node_modules/electron/dist/electron.exe\" \"c:/AnyLocal\")",
       "Read(//c/Users/Asus/AppData/Local/Temp/**)",
-      "Bash(taskkill //IM electron.exe //F)"
+      "Bash(taskkill //IM electron.exe //F)",
+      "Bash(sleep 6)",
+      "Bash(node \"C:/Users/Asus/AppData/Local/Temp/claude/c--AnyLocal/68b6ed1a-2ad4-4b4c-ad3a-ab1c72dad5a8/scratchpad/session_test.js\")",
+      "Bash(echo '=== test exit: __TRACKED_VAR__ ===')"
     ],
     "additionalDirectories": [
       "c:\\Users\\Asus\\.claude\\projects\\c--AnyLocal\\memory"
