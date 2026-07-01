@@ -10,8 +10,6 @@ files:
 extraResources:
   - from: python-sidecar/dist/landesk-sidecar.exe
     to: landesk-sidecar.exe
-  - from: resources/ffmpeg.exe
-    to: ffmpeg.exe
 win:
   target:
     - target: portable

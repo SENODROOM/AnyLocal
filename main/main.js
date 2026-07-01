@@ -132,7 +132,7 @@ function enableHostMode() {
 
   startVideoServer(VIDEO_PORT);
   startInputServer(INPUT_PORT, () => sidecar);
-  discovery.startBroadcasting({ name: os.hostname(), videoPort: VIDEO_PORT, inputPort: INPUT_PORT });
+  discovery.setHostReady(true, VIDEO_PORT, INPUT_PORT);
 
   hostMode = true;
   updateTrayMenu();
@@ -143,7 +143,7 @@ function enableHostMode() {
 
 function disableHostMode() {
   hostMode = false;
-  discovery.stopBroadcasting();
+  discovery.setHostReady(false);
   stopVideoServer();
   stopInputServer();
   if (sidecar) {
@@ -214,16 +214,40 @@ function createTray() {
 // IPC bridge
 // ---------------------------------------------------------------------------
 function wireIpc() {
-  ipcMain.handle('get-hosts', () => discovery.getHosts());
-  ipcMain.handle('enable-host', () => enableHostMode());
+  ipcMain.handle('get-hosts',    () => discovery.getHosts());
+  ipcMain.handle('enable-host',  () => enableHostMode());
   ipcMain.handle('disable-host', () => disableHostMode());
-  ipcMain.handle('host-state', () => ({ hostMode }));
+  ipcMain.handle('host-state',   () => ({ hostMode }));
   ipcMain.handle('get-self', () => ({
     name: os.hostname(),
     os: process.platform,
     videoPort: VIDEO_PORT,
     inputPort: INPUT_PORT
   }));
+
+  // P2P direct-connect signalling ----------------------------------------
+  ipcMain.handle('request-connect', (_e, host) => {
+    discovery.sendConnectRequest(host.address, { name: os.hostname(), os: process.platform });
+    return { ok: true };
+  });
+
+  ipcMain.handle('accept-connect', async (_e, fromInfo) => {
+    const res = enableHostMode();
+    // Give the sidecar ~500 ms to open its capture loop before we tell the
+    // requester to open the stream.
+    await new Promise(r => setTimeout(r, 500));
+    discovery.sendConnectAccept(fromInfo.address, {
+      name: os.hostname(),
+      videoPort: VIDEO_PORT,
+      inputPort: INPUT_PORT,
+    });
+    return res;
+  });
+
+  ipcMain.handle('deny-connect', (_e, fromInfo) => {
+    discovery.sendConnectDeny(fromInfo.address, { name: os.hostname() });
+    return { ok: true };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -242,10 +266,21 @@ if (!singleInstance) {
     createWindow();
     createTray();
 
-    // Controller mode is always on: listen for hosts on the LAN.
+    // Every instance broadcasts as a visible peer from the start (hostReady:false).
+    // Enabling Host Mode flips it to hostReady:true with the WS ports.
+    discovery.startBroadcasting({ name: os.hostname() });
+
+    // Wire up P2P signalling callbacks before starting the listener.
+    discovery.setRequestHandlers(
+      (from) => { if (mainWindow) mainWindow.webContents.send('connect-request',  from); },
+      (from) => { if (mainWindow) mainWindow.webContents.send('connect-accepted', from); },
+      (from) => { if (mainWindow) mainWindow.webContents.send('connect-denied',   from); }
+    );
+
+    // Controller mode: listen for peer/host beacons and signalling.
     discovery.startListening(
       (host) => { if (mainWindow) mainWindow.webContents.send('host-found', host); },
-      (host) => { if (mainWindow) mainWindow.webContents.send('host-lost', host); }
+      (host) => { if (mainWindow) mainWindow.webContents.send('host-lost',  host); }
     );
 
     app.on('activate', () => {

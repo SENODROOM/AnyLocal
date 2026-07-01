@@ -1,21 +1,36 @@
 'use strict';
 
 // UDP discovery for LANDesk.
-//  - Host mode broadcasts a JSON presence beacon every 2s on 255.255.255.255:54321
-//  - Controller mode listens on 54321, tracks live hosts, expires stale ones (8s)
+//  - Every instance broadcasts a peer beacon (hostReady:false) from startup.
+//  - Enabling Host Mode flips the beacon to hostReady:true with ports.
+//  - Controller side listens on 54321, tracks live peers, expires stale ones (8s).
+//  - Unicast messages on the same port carry connect-request / accept / deny.
 
 const dgram = require('dgram');
 const os = require('os');
 
-const DISCOVERY_PORT = 54321;
-const BROADCAST_ADDR = '255.255.255.255';
+const DISCOVERY_PORT     = 54321;
+const BROADCAST_ADDR     = '255.255.255.255';
 const BROADCAST_INTERVAL = 2000;
-const EXPIRY_MS = 8000;
+const EXPIRY_MS          = 8000;
+
+const MSG_BEACON  = 'LANDesk-Host';
+const MSG_REQUEST = 'LANDesk-Request';
+const MSG_ACCEPT  = 'LANDesk-Accept';
+const MSG_DENY    = 'LANDesk-Deny';
 
 let broadcastSocket = null;
-let broadcastTimer = null;
-let listenSocket = null;
-let expiryTimer = null;
+let broadcastTimer  = null;
+let listenSocket    = null;
+let expiryTimer     = null;
+
+// Dynamic portion of the beacon — mutated by setHostReady().
+let _broadcastExtra = { hostReady: false };
+
+// P2P request callbacks set by setRequestHandlers().
+let _onRequest = null;
+let _onAccept  = null;
+let _onDeny    = null;
 
 // Map<string key, hostInfo>
 const hosts = new Map();
@@ -24,19 +39,18 @@ function localKey(addr, name) {
   return `${addr}:${name}`;
 }
 
-function startBroadcasting(opts = {}) {
-  if (broadcastSocket) return; // already broadcasting
+// ---- Broadcast (always on after app start) --------------------------------
 
-  const payload = {
+function startBroadcasting(opts = {}) {
+  if (broadcastSocket) return;
+
+  const basePayload = {
     name: opts.name || os.hostname(),
-    port: opts.videoPort || 8765,
-    inputPort: opts.inputPort || 8766,
     os: process.platform,
-    type: 'LANDesk-Host'
+    type: MSG_BEACON,
   };
 
   broadcastSocket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-
   broadcastSocket.on('error', (err) => {
     console.error('[discovery] broadcast error:', err.message);
   });
@@ -44,8 +58,7 @@ function startBroadcasting(opts = {}) {
   broadcastSocket.bind(() => {
     broadcastSocket.setBroadcast(true);
     const send = () => {
-      // payload may change (e.g. PIN) — re-stringify each tick
-      const buf = Buffer.from(JSON.stringify({ ...payload, ...opts.dynamic }));
+      const buf = Buffer.from(JSON.stringify({ ...basePayload, ..._broadcastExtra }));
       broadcastSocket.send(buf, 0, buf.length, DISCOVERY_PORT, BROADCAST_ADDR, (err) => {
         if (err) console.error('[discovery] send failed:', err.message);
       });
@@ -54,7 +67,16 @@ function startBroadcasting(opts = {}) {
     broadcastTimer = setInterval(send, BROADCAST_INTERVAL);
   });
 
-  console.log('[discovery] broadcasting as', payload.name);
+  console.log('[discovery] broadcasting as', basePayload.name);
+}
+
+// Called by main.js when Host Mode is toggled.
+function setHostReady(ready, videoPort, inputPort) {
+  if (ready) {
+    _broadcastExtra = { hostReady: true, port: videoPort, inputPort };
+  } else {
+    _broadcastExtra = { hostReady: false };
+  }
 }
 
 function stopBroadcasting() {
@@ -66,28 +88,85 @@ function stopBroadcasting() {
   broadcastSocket = null;
 }
 
-// onHost(hostInfo) called whenever a host appears or refreshes.
-// onLost(hostInfo) called when a host expires.
+// ---- Unicast signalling ---------------------------------------------------
+
+function sendUnicast(address, payload) {
+  const sock = dgram.createSocket('udp4');
+  const buf = Buffer.from(JSON.stringify(payload));
+  sock.send(buf, 0, buf.length, DISCOVERY_PORT, address, () => {
+    try { sock.close(); } catch (_) {}
+  });
+}
+
+function sendConnectRequest(targetAddress, selfInfo) {
+  sendUnicast(targetAddress, { type: MSG_REQUEST, from: selfInfo.name, os: selfInfo.os });
+}
+
+function sendConnectAccept(targetAddress, selfInfo) {
+  sendUnicast(targetAddress, {
+    type: MSG_ACCEPT,
+    from: selfInfo.name,
+    port: selfInfo.videoPort,
+    inputPort: selfInfo.inputPort,
+  });
+}
+
+function sendConnectDeny(targetAddress, selfInfo) {
+  sendUnicast(targetAddress, { type: MSG_DENY, from: selfInfo.name });
+}
+
+// Register callbacks for incoming signalling messages.
+function setRequestHandlers(onRequest, onAccept, onDeny) {
+  _onRequest = onRequest;
+  _onAccept  = onAccept;
+  _onDeny    = onDeny;
+}
+
+// ---- Listen --------------------------------------------------------------
+
 function startListening(onHost, onLost) {
   if (listenSocket) return;
 
   listenSocket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-
   listenSocket.on('error', (err) => {
     console.error('[discovery] listen error:', err.message);
   });
 
   listenSocket.on('message', (msg, rinfo) => {
     let data;
-    try {
-      data = JSON.parse(msg.toString());
-    } catch (_) {
-      return; // not our packet
+    try { data = JSON.parse(msg.toString()); } catch (_) { return; }
+    if (!data) return;
+
+    // P2P signalling messages (unicast).
+    if (data.type === MSG_REQUEST) {
+      if (typeof _onRequest === 'function') {
+        _onRequest({ name: data.from, os: data.os || 'unknown', address: rinfo.address });
+      }
+      return;
     }
-    if (!data || data.type !== 'LANDesk-Host') return;
+    if (data.type === MSG_ACCEPT) {
+      if (typeof _onAccept === 'function') {
+        _onAccept({
+          name: data.from,
+          address: rinfo.address,
+          port: data.port || 8765,
+          inputPort: data.inputPort || 8766,
+          hostReady: true,
+        });
+      }
+      return;
+    }
+    if (data.type === MSG_DENY) {
+      if (typeof _onDeny === 'function') {
+        _onDeny({ name: data.from, address: rinfo.address });
+      }
+      return;
+    }
+
+    // Peer / host beacons (broadcast).
+    if (data.type !== MSG_BEACON) return;
 
     const key = localKey(rinfo.address, data.name);
-    const existing = hosts.get(key);
     const host = {
       key,
       name: data.name,
@@ -95,23 +174,17 @@ function startListening(onHost, onLost) {
       port: data.port || 8765,
       inputPort: data.inputPort || 8766,
       os: data.os || 'unknown',
-      pinRequired: !!data.pinRequired,
-      lastSeen: Date.now()
+      hostReady: !!data.hostReady,
+      lastSeen: Date.now(),
     };
     hosts.set(key, host);
-    if (!existing && typeof onHost === 'function') {
-      onHost(host);
-    } else if (existing && typeof onHost === 'function') {
-      // refresh (keeps lastSeen alive on renderer side)
-      onHost(host);
-    }
+    if (typeof onHost === 'function') onHost(host);
   });
 
   listenSocket.bind(DISCOVERY_PORT, () => {
     console.log('[discovery] listening on', DISCOVERY_PORT);
   });
 
-  // expiry sweep
   expiryTimer = setInterval(() => {
     const now = Date.now();
     for (const [key, host] of hosts) {
@@ -140,8 +213,13 @@ function getHosts() {
 module.exports = {
   startBroadcasting,
   stopBroadcasting,
+  setHostReady,
   startListening,
   stopListening,
+  setRequestHandlers,
+  sendConnectRequest,
+  sendConnectAccept,
+  sendConnectDeny,
   getHosts,
-  DISCOVERY_PORT
+  DISCOVERY_PORT,
 };

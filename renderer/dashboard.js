@@ -1,37 +1,40 @@
 'use strict';
 
-// Dashboard orchestration: device discovery → cards, tab management, session
-// lifecycle (video + input), host-mode toggle, quality / fullscreen controls.
+// Dashboard: device discovery → cards, tab management, session lifecycle,
+// host-mode toggle, quality / fullscreen controls, and P2P connect-request flow.
 
 const { ipcRenderer } = require('electron');
 
 window.LANDesk = window.LANDesk || {};
 
 (function () {
-  const deviceListEl = document.getElementById('deviceList');
-  const emptyHint = document.getElementById('emptyHint');
-  const hostCountEl = document.getElementById('hostCount');
-  const tabsEl = document.getElementById('tabs');
-  const hostModeBtn = document.getElementById('hostModeBtn');
-  const selfInfoEl = document.getElementById('selfInfo');
-  const statusDot = document.getElementById('statusDot');
+  const deviceListEl   = document.getElementById('deviceList');
+  const emptyHint      = document.getElementById('emptyHint');
+  const hostCountEl    = document.getElementById('hostCount');
+  const tabsEl         = document.getElementById('tabs');
+  const hostModeBtn    = document.getElementById('hostModeBtn');
+  const selfInfoEl     = document.getElementById('selfInfo');
+  const statusDot      = document.getElementById('statusDot');
+  const toastContainer = document.getElementById('toastContainer');
 
-  const placeholder = document.getElementById('placeholder');
-  const stage = document.getElementById('stage');
-  const qualityGroup = document.getElementById('qualityGroup');
+  const placeholder   = document.getElementById('placeholder');
+  const stage         = document.getElementById('stage');
+  const qualityGroup  = document.getElementById('qualityGroup');
   const fullscreenBtn = document.getElementById('fullscreenBtn');
   const disconnectBtn = document.getElementById('disconnectBtn');
 
-  const hosts = new Map();      // key -> host
-  const openTabs = new Map();   // key -> host (sessions opened as tabs)
-  let activeKey = null;
+  const hosts       = new Map();  // key -> host
+  const openTabs    = new Map();  // key -> host (live sessions)
+  const pendingReqs = new Set();  // keys where we sent a request and are waiting
+  let activeKey      = null;
   let currentQuality = 'med';
 
   const OS_ICON = { win32: '🪟', darwin: '🍎', linux: '🐧' };
+  const OS_NAME = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' };
 
   // ----------------------------------------------------------------- latency
   function pingHost(host) {
-    // Connect-time to the input port is a cheap LAN RTT proxy (no data pushed).
+    if (!host.hostReady) return;
     const start = performance.now();
     let done = false;
     try {
@@ -43,10 +46,10 @@ window.LANDesk = window.LANDesk || {};
         const card = deviceListEl.querySelector(`[data-key="${cssEscape(host.key)}"]`);
         if (card) updateCardLatency(card, val);
       };
-      probe.onopen = () => finish(Math.round(performance.now() - start));
+      probe.onopen  = () => finish(Math.round(performance.now() - start));
       probe.onerror = () => finish(null);
       setTimeout(() => finish(host.latency ?? null), 1500);
-    } catch (_) { /* ignore */ }
+    } catch (_) {}
   }
 
   function cssEscape(s) { return String(s).replace(/["\\]/g, '\\$&'); }
@@ -55,9 +58,9 @@ window.LANDesk = window.LANDesk || {};
   function renderDeviceList() {
     const list = Array.from(hosts.values());
     hostCountEl.textContent = String(list.length);
-    emptyHint.style.display = list.length ? 'none' : 'block';
+    hostCountEl.classList.toggle('live', list.length > 0);
+    emptyHint.style.display = list.length ? 'none' : '';
 
-    // Remove cards for hosts that disappeared.
     for (const el of Array.from(deviceListEl.querySelectorAll('.card'))) {
       if (!hosts.has(el.dataset.key)) el.remove();
     }
@@ -67,7 +70,7 @@ window.LANDesk = window.LANDesk || {};
         card = buildCard(host);
         deviceListEl.appendChild(card);
       }
-      card.classList.toggle('connected', openTabs.has(host.key));
+      syncCardState(card, host);
     }
   }
 
@@ -80,18 +83,59 @@ window.LANDesk = window.LANDesk || {};
       <div class="card-row">
         <div class="card-name"><span class="os-icon">${icon}</span>${escapeHtml(host.name)}</div>
       </div>
+      <div class="card-addr">${escapeHtml(host.address)}</div>
       <div class="card-meta">
         <span class="latency"><span class="ping-dot"></span><span class="ping-val">…</span></span>
-        <span class="connect-pill">Connect →</span>
+        <span class="connect-pill"></span>
       </div>`;
-    card.addEventListener('click', () => openSession(host));
-    updateCardLatency(card, host.latency ?? null);
+    card.addEventListener('click', () => handleCardClick(host));
     return card;
+  }
+
+  function syncCardState(card, host) {
+    const isConnected = openTabs.has(host.key);
+    const isPending   = pendingReqs.has(host.key);
+
+    card.classList.toggle('connected', isConnected);
+    card.classList.toggle('pending',   isPending);
+
+    const pill = card.querySelector('.connect-pill');
+    if (!pill) return;
+
+    if (isConnected) {
+      pill.textContent  = '● Active';
+      pill.dataset.kind = 'active';
+    } else if (isPending) {
+      pill.textContent  = '◌ Waiting…';
+      pill.dataset.kind = 'pending';
+    } else if (host.hostReady) {
+      pill.textContent  = 'Connect →';
+      pill.dataset.kind = 'connect';
+      updateCardLatency(card, host.latency ?? null);
+    } else {
+      pill.textContent  = 'Request →';
+      pill.dataset.kind = 'request';
+      const dot = card.querySelector('.ping-dot');
+      const txt = card.querySelector('.ping-val');
+      if (dot) dot.style.visibility = 'hidden';
+      if (txt) txt.textContent = 'peer';
+    }
+  }
+
+  function handleCardClick(host) {
+    if (openTabs.has(host.key) || pendingReqs.has(host.key)) return;
+    if (host.hostReady) {
+      openSession(host);
+    } else {
+      sendConnectRequest(host);
+    }
   }
 
   function updateCardLatency(card, val) {
     const dot = card.querySelector('.ping-dot');
     const txt = card.querySelector('.ping-val');
+    if (!dot || !txt) return;
+    dot.style.visibility = '';
     if (val == null) {
       txt.textContent = 'offline?';
       dot.className = 'ping-dot bad';
@@ -101,15 +145,113 @@ window.LANDesk = window.LANDesk || {};
     dot.className = 'ping-dot' + (val > 60 ? ' bad' : val > 25 ? ' high' : '');
   }
 
+  // ----------------------------------------------------------------- P2P flow
+  function sendConnectRequest(host) {
+    pendingReqs.add(host.key);
+    renderDeviceList();
+    ipcRenderer.invoke('request-connect', host);
+    // Auto-cancel if no response within 20 s.
+    setTimeout(() => {
+      if (pendingReqs.has(host.key)) {
+        pendingReqs.delete(host.key);
+        renderDeviceList();
+        showStatusToast(`${host.name} did not respond`, 'warn');
+      }
+    }, 20000);
+  }
+
+  // Incoming request — show accept/deny toast.
+  ipcRenderer.on('connect-request', (_e, fromInfo) => {
+    showIncomingRequestToast(fromInfo);
+  });
+
+  // Our request was accepted — open the stream automatically.
+  ipcRenderer.on('connect-accepted', (_e, info) => {
+    for (const key of pendingReqs) {
+      const h = hosts.get(key);
+      if (h && h.address === info.address) { pendingReqs.delete(key); break; }
+    }
+    const existing = Array.from(hosts.values()).find(h => h.address === info.address);
+    const host = existing
+      ? { ...existing, port: info.port, inputPort: info.inputPort, hostReady: true }
+      : { key: `${info.address}:${info.name}`, name: info.name, address: info.address,
+          port: info.port, inputPort: info.inputPort, hostReady: true, os: info.os || 'unknown' };
+    hosts.set(host.key, host);
+    renderDeviceList();
+    openSession(host);
+  });
+
+  // Our request was denied.
+  ipcRenderer.on('connect-denied', (_e, info) => {
+    for (const key of pendingReqs) {
+      const h = hosts.get(key);
+      if (h && h.address === info.address) { pendingReqs.delete(key); break; }
+    }
+    renderDeviceList();
+    showStatusToast(`${escapeHtml(info.name)} declined the request`, 'danger');
+  });
+
+  function showIncomingRequestToast(fromInfo) {
+    const icon = OS_ICON[fromInfo.os] || '💻';
+    const toast = document.createElement('div');
+    toast.className = 'toast toast-request';
+    toast.innerHTML = `
+      <div class="toast-header">
+        <span class="toast-os-icon">${icon}</span>
+        <div class="toast-body">
+          <div class="toast-title">${escapeHtml(fromInfo.name)}</div>
+          <div class="toast-sub">wants to view your screen&ensp;·&ensp;${escapeHtml(fromInfo.address)}</div>
+        </div>
+      </div>
+      <div class="toast-actions">
+        <button class="toast-btn toast-accept">Accept</button>
+        <button class="toast-btn toast-deny">Deny</button>
+      </div>`;
+
+    let dismissed = false;
+    const dismiss = () => {
+      if (dismissed) return; dismissed = true;
+      toast.classList.add('toast-out');
+      setTimeout(() => toast.remove(), 280);
+    };
+
+    toast.querySelector('.toast-accept').addEventListener('click', async () => {
+      dismiss();
+      await ipcRenderer.invoke('accept-connect', fromInfo);
+    });
+    toast.querySelector('.toast-deny').addEventListener('click', () => {
+      dismiss();
+      ipcRenderer.invoke('deny-connect', fromInfo);
+    });
+
+    toastContainer.appendChild(toast);
+    setTimeout(dismiss, 30000);
+  }
+
+  function showStatusToast(message, type = 'info') {
+    const toast = document.createElement('div');
+    toast.className = `toast toast-status toast-${type}`;
+    toast.textContent = message;
+    let dismissed = false;
+    const dismiss = () => {
+      if (dismissed) return; dismissed = true;
+      toast.classList.add('toast-out');
+      setTimeout(() => toast.remove(), 280);
+    };
+    toast.addEventListener('click', dismiss);
+    toastContainer.appendChild(toast);
+    setTimeout(dismiss, 4000);
+  }
+
   // ----------------------------------------------------------------- tabs
   function renderTabs() {
     tabsEl.innerHTML = '';
     for (const host of openTabs.values()) {
       const tab = document.createElement('div');
       tab.className = 'tab' + (host.key === activeKey ? ' active' : '');
-      tab.innerHTML = `<span>${escapeHtml(host.name)}</span><span class="close">✕</span>`;
+      tab.innerHTML = `<span>${escapeHtml(host.name)}</span><span class="tab-close">✕</span>`;
       tab.addEventListener('click', (e) => {
-        if (e.target.classList.contains('close')) {
+        if (e.target.classList.contains('tab-close')) {
           closeSession(host.key);
         } else {
           activateSession(host.key);
@@ -131,8 +273,9 @@ window.LANDesk = window.LANDesk || {};
     if (!host) return;
     activeKey = key;
 
-    placeholder.hidden = true;
+    placeholder.hidden = false; // keep placeholder markup alive; stage covers it
     stage.hidden = false;
+    placeholder.style.display = 'none';
     qualityGroup.hidden = false;
     fullscreenBtn.hidden = false;
     disconnectBtn.hidden = false;
@@ -166,6 +309,7 @@ window.LANDesk = window.LANDesk || {};
   }
 
   function showPlaceholder() {
+    placeholder.style.display = '';
     placeholder.hidden = false;
     stage.hidden = true;
     qualityGroup.hidden = true;
@@ -220,7 +364,7 @@ window.LANDesk = window.LANDesk || {};
     if (prev) host.latency = prev.latency;
     hosts.set(host.key, host);
     renderDeviceList();
-    if (wasNew) pingHost(host);
+    if (wasNew && host.hostReady) pingHost(host);
   });
 
   ipcRenderer.on('host-lost', (_e, host) => {
@@ -228,8 +372,7 @@ window.LANDesk = window.LANDesk || {};
     renderDeviceList();
   });
 
-  // Periodically refresh latency for visible hosts.
-  setInterval(() => { for (const h of hosts.values()) pingHost(h); }, 5000);
+  setInterval(() => { for (const h of hosts.values()) if (h.hostReady) pingHost(h); }, 5000);
 
   // ----------------------------------------------------------------- util
   function escapeHtml(s) {
@@ -242,11 +385,11 @@ window.LANDesk = window.LANDesk || {};
   (async function init() {
     try {
       const self = await ipcRenderer.invoke('get-self');
-      selfInfoEl.textContent = `${self.name} · ${self.os}`;
+      selfInfoEl.textContent = `${self.name} · ${OS_NAME[self.os] || self.os}`;
     } catch (_) {}
     try {
       const existing = await ipcRenderer.invoke('get-hosts');
-      for (const h of existing) { hosts.set(h.key, h); pingHost(h); }
+      for (const h of existing) { hosts.set(h.key, h); if (h.hostReady) pingHost(h); }
       renderDeviceList();
     } catch (_) {}
   })();

@@ -9,3 +9,5 @@ python-sidecar/*.spec
 # Bundled binaries (provide locally)
 resources/ffmpeg.exe
 resources/*.ico
+CLAUDE.md
+/CLAUDE.md

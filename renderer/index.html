@@ -32,15 +32,30 @@
         <span id="hostCount" class="badge">0</span>
       </div>
       <div id="deviceList" class="device-list">
-        <div class="empty" id="emptyHint">Searching the LAN…</div>
+        <div class="searching-hint" id="emptyHint">
+          <div class="search-spinner"></div>
+          <span>Searching the LAN…</span>
+        </div>
       </div>
-      <button id="hostModeBtn" class="host-btn">+ Enable Host Mode</button>
-      <div id="selfInfo" class="self-info"></div>
+      <div class="sidebar-footer">
+        <button id="hostModeBtn" class="host-btn">+ Enable Host Mode</button>
+        <div id="selfInfo" class="self-info"></div>
+      </div>
     </aside>
 
     <main id="main">
       <div id="placeholder" class="placeholder">
-        <div class="ph-icon">🖥️</div>
+        <div class="ph-icon">
+          <svg viewBox="0 0 80 68" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="2" y="2" width="76" height="50" rx="5" stroke="currentColor" stroke-width="2.5"/>
+            <rect x="9" y="9" width="62" height="36" rx="2" fill="currentColor" opacity="0.07"/>
+            <path d="M30 52 L28 62" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+            <path d="M50 52 L52 62" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+            <line x1="22" y1="62" x2="58" y2="62" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+            <line x1="18" y1="24" x2="62" y2="24" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.2"/>
+            <line x1="18" y1="32" x2="46" y2="32" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.14"/>
+          </svg>
+        </div>
         <p>Select a device from the left to start a live session.</p>
         <p class="muted">All traffic stays on your local network.</p>
       </div>
@@ -50,6 +65,8 @@
       </div>
     </main>
   </div>
+
+  <div id="toastContainer" class="toast-container"></div>
 
   <script src="streamView.js"></script>
   <script src="inputCapture.js"></script>
