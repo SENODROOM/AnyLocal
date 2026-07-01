@@ -196,7 +196,11 @@ button.danger:hover { background: rgba(218,54,51,0.12); border-color: var(--dang
   border-radius: 50%;
   animation: spin 0.85s linear infinite;
 }
-.searching-hint span { font-size: 12px; letter-spacing: 0.2px; }
+.searching-hint span { font-size: 12.5px; letter-spacing: 0.2px; color: var(--text); }
+.searching-hint small {
+  font-size: 11px; color: #6e7681; line-height: 1.5;
+  max-width: 190px; text-align: center;
+}
 
 /* Device cards */
 .card {
@@ -246,35 +250,35 @@ button.danger:hover { background: rgba(218,54,51,0.12); border-color: var(--dang
 }
 .card.connected .connect-pill { color: var(--accent-2); }
 
-/* ---- Sidebar footer ---- */
-.sidebar-footer { padding-top: 10px; }
-
-.host-btn {
-  width: 100%; padding: 10px 16px;
-  border-radius: var(--radius); border: none;
-  background: var(--accent-2); color: #fff;
-  cursor: pointer; font-size: 13px; font-weight: 600;
-  display: flex; align-items: center; justify-content: center; gap: 6px;
-  transition: filter 0.15s, box-shadow 0.15s, background 0.15s, border 0.15s;
-}
-.host-btn:hover {
-  filter: brightness(1.13);
-  box-shadow: 0 4px 16px rgba(35,134,54,0.4);
-}
-.host-btn.on {
-  background: transparent;
-  border: 1px solid rgba(218,54,51,0.5);
-  color: #ff7b72;
-  filter: none;
-}
-.host-btn.on:hover {
-  background: rgba(218,54,51,0.1);
-  box-shadow: 0 4px 12px rgba(218,54,51,0.2);
+/* ---- Sidebar footer (self status) ---- */
+.sidebar-footer {
+  padding-top: 12px; margin-top: 8px;
+  border-top: 1px solid var(--border);
 }
 
+.self-card {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.self-dot {
+  width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+  background: var(--accent-2);
+  box-shadow: 0 0 8px rgba(35,134,54,0.7);
+}
+.self-text { min-width: 0; }
+.self-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--muted); font-weight: 600;
+}
 .self-info {
-  margin-top: 10px; font-size: 11px; color: var(--muted);
-  text-align: center; line-height: 1.7;
+  font-size: 12.5px; font-weight: 600; color: var(--text);
+  margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.self-hint {
+  font-size: 11px; color: #6e7681; line-height: 1.5;
+  padding: 8px 4px 2px; text-align: center;
 }
 
 /* ---- Main content area ---- */

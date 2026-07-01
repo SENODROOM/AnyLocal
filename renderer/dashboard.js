@@ -12,7 +12,6 @@ window.LANDesk = window.LANDesk || {};
   const emptyHint      = document.getElementById('emptyHint');
   const hostCountEl    = document.getElementById('hostCount');
   const tabsEl         = document.getElementById('tabs');
-  const hostModeBtn    = document.getElementById('hostModeBtn');
   const selfInfoEl     = document.getElementById('selfInfo');
   const statusDot      = document.getElementById('statusDot');
   const toastContainer = document.getElementById('toastContainer');
@@ -103,22 +102,22 @@ window.LANDesk = window.LANDesk || {};
     if (!pill) return;
 
     if (isConnected) {
-      pill.textContent  = '● Active';
+      pill.textContent  = '● Connected';
       pill.dataset.kind = 'active';
     } else if (isPending) {
-      pill.textContent  = '◌ Waiting…';
+      pill.textContent  = '◌ Connecting…';
       pill.dataset.kind = 'pending';
-    } else if (host.hostReady) {
+    } else {
       pill.textContent  = 'Connect →';
       pill.dataset.kind = 'connect';
-      updateCardLatency(card, host.latency ?? null);
-    } else {
-      pill.textContent  = 'Request →';
-      pill.dataset.kind = 'request';
-      const dot = card.querySelector('.ping-dot');
-      const txt = card.querySelector('.ping-val');
-      if (dot) dot.style.visibility = 'hidden';
-      if (txt) txt.textContent = 'peer';
+      if (host.hostReady) {
+        updateCardLatency(card, host.latency ?? null);
+      } else {
+        const dot = card.querySelector('.ping-dot');
+        const txt = card.querySelector('.ping-val');
+        if (dot) dot.style.visibility = 'hidden';
+        if (txt) txt.textContent = 'ready';
+      }
     }
   }
 
@@ -127,6 +126,8 @@ window.LANDesk = window.LANDesk || {};
     if (host.hostReady) {
       openSession(host);
     } else {
+      // Ask the peer to share its screen. It auto-accepts and we open the
+      // stream when the accept arrives (see 'connect-accepted' below).
       sendConnectRequest(host);
     }
   }
@@ -160,9 +161,9 @@ window.LANDesk = window.LANDesk || {};
     }, 20000);
   }
 
-  // Incoming request — show accept/deny toast.
-  ipcRenderer.on('connect-request', (_e, fromInfo) => {
-    showIncomingRequestToast(fromInfo);
+  // Someone connected to THIS pc (auto-accepted). Just let the user know.
+  ipcRenderer.on('incoming-connection', (_e, fromInfo) => {
+    showStatusToast(`${escapeHtml(fromInfo.name)} connected to this PC`, 'info');
   });
 
   // Our request was accepted — open the stream automatically.
@@ -190,43 +191,6 @@ window.LANDesk = window.LANDesk || {};
     renderDeviceList();
     showStatusToast(`${escapeHtml(info.name)} declined the request`, 'danger');
   });
-
-  function showIncomingRequestToast(fromInfo) {
-    const icon = OS_ICON[fromInfo.os] || '💻';
-    const toast = document.createElement('div');
-    toast.className = 'toast toast-request';
-    toast.innerHTML = `
-      <div class="toast-header">
-        <span class="toast-os-icon">${icon}</span>
-        <div class="toast-body">
-          <div class="toast-title">${escapeHtml(fromInfo.name)}</div>
-          <div class="toast-sub">wants to view your screen&ensp;·&ensp;${escapeHtml(fromInfo.address)}</div>
-        </div>
-      </div>
-      <div class="toast-actions">
-        <button class="toast-btn toast-accept">Accept</button>
-        <button class="toast-btn toast-deny">Deny</button>
-      </div>`;
-
-    let dismissed = false;
-    const dismiss = () => {
-      if (dismissed) return; dismissed = true;
-      toast.classList.add('toast-out');
-      setTimeout(() => toast.remove(), 280);
-    };
-
-    toast.querySelector('.toast-accept').addEventListener('click', async () => {
-      dismiss();
-      await ipcRenderer.invoke('accept-connect', fromInfo);
-    });
-    toast.querySelector('.toast-deny').addEventListener('click', () => {
-      dismiss();
-      ipcRenderer.invoke('deny-connect', fromInfo);
-    });
-
-    toastContainer.appendChild(toast);
-    setTimeout(dismiss, 30000);
-  }
 
   function showStatusToast(message, type = 'info') {
     const toast = document.createElement('div');
@@ -335,27 +299,14 @@ window.LANDesk = window.LANDesk || {};
     });
   });
 
-  // ----------------------------------------------------------------- host mode
-  let hostModeOn = false;
-  hostModeBtn.addEventListener('click', async () => {
-    if (!hostModeOn) {
-      const res = await ipcRenderer.invoke('enable-host');
-      if (!res || !res.ok) {
-        alert('Could not enable host mode: ' + (res && res.error ? res.error : 'unknown'));
-      }
-    } else {
-      await ipcRenderer.invoke('disable-host');
-    }
-  });
-
+  // ----------------------------------------------------------------- host state
+  // Host mode is now enabled automatically when a peer connects to us; there is
+  // no manual toggle. We only reflect the state in the status dot.
   ipcRenderer.on('host-state', (_e, { hostMode }) => {
-    hostModeOn = hostMode;
-    hostModeBtn.textContent = hostMode ? '■ Disable Host Mode' : '+ Enable Host Mode';
-    hostModeBtn.classList.toggle('on', hostMode);
     statusDot.classList.toggle('host', hostMode && !LANDesk.stream.connected);
   });
 
-  ipcRenderer.on('host-error', (_e, msg) => alert('Host error: ' + msg));
+  ipcRenderer.on('host-error', (_e, msg) => showStatusToast('Host error: ' + msg, 'danger'));
 
   // ----------------------------------------------------------------- discovery
   ipcRenderer.on('host-found', (_e, host) => {

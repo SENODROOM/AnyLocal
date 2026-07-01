@@ -28,18 +28,25 @@
   <div id="layout">
     <aside id="sidebar">
       <div class="sidebar-head">
-        <h2>Devices</h2>
+        <h2>Devices on this network</h2>
         <span id="hostCount" class="badge">0</span>
       </div>
       <div id="deviceList" class="device-list">
         <div class="searching-hint" id="emptyHint">
           <div class="search-spinner"></div>
-          <span>Searching the LAN…</span>
+          <span>Looking for other PCs…</span>
+          <small>Open LANDesk on another PC and it appears here.</small>
         </div>
       </div>
       <div class="sidebar-footer">
-        <button id="hostModeBtn" class="host-btn">+ Enable Host Mode</button>
-        <div id="selfInfo" class="self-info"></div>
+        <div class="self-card">
+          <div class="self-dot"></div>
+          <div class="self-text">
+            <div class="self-label">This PC</div>
+            <div id="selfInfo" class="self-info">…</div>
+          </div>
+        </div>
+        <div class="self-hint">Others can connect to this PC with one click.</div>
       </div>
     </aside>
 

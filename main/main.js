@@ -226,28 +226,32 @@ function wireIpc() {
   }));
 
   // P2P direct-connect signalling ----------------------------------------
+  // Controller asks a peer to share its screen. The peer auto-accepts (see
+  // autoAcceptConnect) and streams back — no interaction needed on that side.
   ipcMain.handle('request-connect', (_e, host) => {
     discovery.sendConnectRequest(host.address, { name: os.hostname(), os: process.platform });
     return { ok: true };
   });
+}
 
-  ipcMain.handle('accept-connect', async (_e, fromInfo) => {
-    const res = enableHostMode();
-    // Give the sidecar ~500 ms to open its capture loop before we tell the
-    // requester to open the stream.
-    await new Promise(r => setTimeout(r, 500));
+// Auto-accept an incoming connect request: enable host mode (if not already),
+// let the sidecar warm up, then tell the requester to open the stream.
+function autoAcceptConnect(fromInfo) {
+  const res = enableHostMode();
+  if (!res.ok) {
+    console.error('[host] auto-accept failed to enable host mode:', res.error);
+    return;
+  }
+  // Let the requester's UI show who just connected to them.
+  if (mainWindow) mainWindow.webContents.send('incoming-connection', fromInfo);
+  // Give the sidecar a moment to open its capture loop before the stream opens.
+  setTimeout(() => {
     discovery.sendConnectAccept(fromInfo.address, {
       name: os.hostname(),
       videoPort: VIDEO_PORT,
       inputPort: INPUT_PORT,
     });
-    return res;
-  });
-
-  ipcMain.handle('deny-connect', (_e, fromInfo) => {
-    discovery.sendConnectDeny(fromInfo.address, { name: os.hostname() });
-    return { ok: true };
-  });
+  }, res.already ? 0 : 500);
 }
 
 // ---------------------------------------------------------------------------
@@ -271,8 +275,12 @@ if (!singleInstance) {
     discovery.startBroadcasting({ name: os.hostname() });
 
     // Wire up P2P signalling callbacks before starting the listener.
+    // Incoming connect requests are AUTO-ACCEPTED: the app silently enables host
+    // mode and streams back. No prompt on the target machine — connecting is a
+    // single click on the controller. (LAN-only; non-private IPs are rejected by
+    // lanGuard on the WebSocket upgrade.)
     discovery.setRequestHandlers(
-      (from) => { if (mainWindow) mainWindow.webContents.send('connect-request',  from); },
+      (from) => { autoAcceptConnect(from); },
       (from) => { if (mainWindow) mainWindow.webContents.send('connect-accepted', from); },
       (from) => { if (mainWindow) mainWindow.webContents.send('connect-denied',   from); }
     );
