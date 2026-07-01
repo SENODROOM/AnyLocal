@@ -11,6 +11,7 @@ LANDesk.stream = (function () {
   const canvas = document.getElementById('screen');
   const ctx = canvas.getContext('2d', { alpha: false });
   const statsEl = document.getElementById('statsOverlay');
+  const msgEl   = document.getElementById('streamMsg');
 
   let ws = null;
   let remoteW = 0;
@@ -20,6 +21,19 @@ LANDesk.stream = (function () {
   let lastTick = performance.now();
   let statsTimer = null;
   let onResolution = null;
+  let gotFrame = false;
+  let noFrameTimer = null;
+
+  // Overlay shown over the (black) canvas until the first frame arrives, or to
+  // explain a stall so a blank screen is never a mystery.
+  function showMsg(text, sub, spinning = true) {
+    if (!msgEl) return;
+    msgEl.hidden = false;
+    msgEl.querySelector('.stream-msg-text').textContent = text;
+    msgEl.querySelector('.stream-msg-sub').textContent = sub || '';
+    msgEl.querySelector('.stream-spinner').style.display = spinning ? '' : 'none';
+  }
+  function hideMsg() { if (msgEl) msgEl.hidden = true; }
 
   function setStats(text) {
     if (statsEl) statsEl.textContent = text;
@@ -63,37 +77,62 @@ LANDesk.stream = (function () {
   function connect(host, onOpen, onClose) {
     disconnect();
     frames = 0; bytes = 0; lastTick = performance.now();
+    gotFrame = false;
     const addr = `ws://${host.address}:${host.port}`;
     ws = new WebSocket(addr);
     ws.binaryType = 'arraybuffer';
 
+    showMsg('Connecting…', addr.replace('ws://', ''));
+
     ws.onopen = () => {
       console.log('[stream] connected', addr);
       startStats();
+      showMsg('Connected — waiting for video…', 'The other PC is starting screen capture.');
+      // If no frame arrives within a few seconds, the host side isn't capturing
+      // (sidecar missing / Python deps not installed on that machine).
+      clearTimeout(noFrameTimer);
+      noFrameTimer = setTimeout(() => {
+        if (!gotFrame) {
+          showMsg(
+            'No video from the other PC',
+            'Its screen-capture helper isn’t running. On that PC, build the sidecar (npm run build-sidecar) or install Python deps.',
+            false
+          );
+        }
+      }, 6000);
       if (typeof onOpen === 'function') onOpen();
     };
     ws.onmessage = (e) => {
       frames++;
       bytes += e.data.byteLength || 0;
+      if (!gotFrame) { gotFrame = true; clearTimeout(noFrameTimer); hideMsg(); }
       drawFrame(e.data);
     };
     ws.onclose = () => {
       console.log('[stream] closed');
       stopStats();
       setStats('');
+      clearTimeout(noFrameTimer);
+      if (!gotFrame) showMsg('Connection closed', 'The other PC dropped the video connection.', false);
       if (typeof onClose === 'function') onClose();
     };
-    ws.onerror = (e) => console.error('[stream] error', e.message || e);
+    ws.onerror = (e) => {
+      console.error('[stream] error', e.message || e);
+      showMsg('Could not connect', 'Check that the other PC is reachable on the LAN.', false);
+    };
   }
 
   function disconnect() {
     stopStats();
     setStats('');
+    clearTimeout(noFrameTimer);
+    hideMsg();
     if (ws) {
       try { ws.onclose = null; ws.close(); } catch (_) {}
     }
     ws = null;
     remoteW = remoteH = 0;
+    gotFrame = false;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
   }
 

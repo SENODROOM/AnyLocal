@@ -8,6 +8,11 @@
 
 const dgram = require('dgram');
 const os = require('os');
+const crypto = require('crypto');
+
+// Unique per app launch — lets us ignore our own broadcast (which loops back on
+// the same host) so a machine never lists itself as a connectable device.
+const INSTANCE_ID = crypto.randomBytes(8).toString('hex');
 
 const DISCOVERY_PORT     = 54321;
 const BROADCAST_ADDR     = '255.255.255.255';
@@ -48,6 +53,7 @@ function startBroadcasting(opts = {}) {
     name: opts.name || os.hostname(),
     os: process.platform,
     type: MSG_BEACON,
+    id: INSTANCE_ID,
   };
 
   broadcastSocket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
@@ -163,8 +169,9 @@ function startListening(onHost, onLost) {
       return;
     }
 
-    // Peer / host beacons (broadcast).
+    // Peer / host beacons (broadcast). Ignore our own looped-back broadcast.
     if (data.type !== MSG_BEACON) return;
+    if (data.id && data.id === INSTANCE_ID) return;
 
     const key = localKey(rinfo.address, data.name);
     const host = {

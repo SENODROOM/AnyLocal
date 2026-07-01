@@ -314,9 +314,32 @@ button.danger:hover { background: rgba(218,54,51,0.12); border-color: var(--dang
 }
 #screen {
   max-width: 100%; max-height: 100%;
-  background: #000; cursor: none; outline: none; display: block;
+  background: #000; cursor: crosshair; outline: none; display: block;
 }
 #screen.focused { box-shadow: 0 0 0 2px var(--accent); }
+
+/* ---- Stream status overlay (shown until first frame / on stall) ---- */
+.stream-msg {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 14px;
+  text-align: center; padding: 24px;
+  background: rgba(5,8,13,0.82);
+  -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+  pointer-events: none;
+}
+.stream-spinner {
+  width: 30px; height: 30px;
+  border: 3px solid rgba(255,255,255,0.12);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.85s linear infinite;
+}
+.stream-msg-text { font-size: 15px; font-weight: 600; color: var(--text); }
+.stream-msg-sub {
+  font-size: 12.5px; color: var(--muted);
+  max-width: 380px; line-height: 1.6;
+}
 
 /* ---- Connect-pill variants ---- */
 .connect-pill[data-kind="connect"] { color: var(--accent); }
