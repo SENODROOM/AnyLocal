@@ -89,7 +89,7 @@ function endSession(notifyPeer) {
 function teardownHostSession(reason) {
   if (session.role !== 'host') return;
   const peer = session.peer;
-  if (peer) discovery.sendConnectBye(peer.address, { name: os.hostname() });
+  if (peer) discovery.sendConnectBye(peer.address, { name: os.hostname(), reason });
   setSession('idle', null);
   if (mainWindow) mainWindow.webContents.send('session-ended', { peer, role: 'host', reason });
 }
@@ -534,7 +534,7 @@ if (!singleInstance) {
         const role = session.role;
         if (role === 'host') disableHostMode();
         setSession('idle', null);
-        if (mainWindow) mainWindow.webContents.send('session-ended', { peer: from, role });
+        if (mainWindow) mainWindow.webContents.send('session-ended', { peer: from, role, reason: from.reason });
       }
     );
 

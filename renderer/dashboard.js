@@ -212,19 +212,27 @@ window.LANDesk = window.LANDesk || {};
   // Someone started controlling THIS pc — show the lock banner + Stop control.
   ipcRenderer.on('being-controlled', (_e, fromInfo) => {
     showControlBanner(fromInfo);
-    showStatusToast(`${escapeHtml(fromInfo.name)} is now controlling this PC`, 'info');
+    showStatusToast(`${fromInfo.name} is now controlling this PC`, 'info');
   });
 
   // The peer ended the session (they disconnected, or their host crashed).
-  ipcRenderer.on('session-ended', (_e, { peer, role }) => {
+  ipcRenderer.on('session-ended', (_e, { peer, role, reason }) => {
     hideControlBanner();
     if (!peer) return;
     if (role === 'controller') {
       const h = Array.from(hosts.values()).find((x) => x.address === peer.address);
       if (h && openTabs.has(h.key)) teardownSessionUI(h.key);
-      showStatusToast(`${escapeHtml(peer.name)} stopped sharing`, 'info');
+      if (reason === 'error' || reason === 'crash') {
+        showStatusToast(
+          `${peer.name}'s screen-capture helper failed to start. On that PC, install the Python deps ` +
+          `(pip install -r python-sidecar/requirements.txt) or build the sidecar (npm run build-sidecar).`,
+          'danger'
+        );
+      } else {
+        showStatusToast(`${peer.name} stopped sharing`, 'info');
+      }
     } else {
-      showStatusToast(`${escapeHtml(peer.name)} disconnected`, 'info');
+      showStatusToast(`${peer.name} disconnected`, 'info');
     }
   });
 
@@ -252,10 +260,10 @@ window.LANDesk = window.LANDesk || {};
     }
     renderDeviceList();
     const msg = info.reason === 'busy'
-      ? `${escapeHtml(info.name)} is busy in another session`
+      ? `${info.name} is busy in another session`
       : info.reason === 'error'
-        ? `${escapeHtml(info.name)} could not start screen sharing`
-        : `${escapeHtml(info.name)} declined the request`;
+        ? `${info.name} could not start screen sharing — its capture helper failed (Python deps missing?)`
+        : `${info.name} declined the request`;
     showStatusToast(msg, info.reason === 'busy' ? 'warn' : 'danger');
   });
 
@@ -271,7 +279,8 @@ window.LANDesk = window.LANDesk || {};
     };
     toast.addEventListener('click', dismiss);
     toastContainer.appendChild(toast);
-    setTimeout(dismiss, 4000);
+    // Failure toasts carry instructions — give them time to be read.
+    setTimeout(dismiss, type === 'danger' ? 10000 : 4000);
   }
 
   // ----------------------------------------------------------------- tabs

@@ -134,8 +134,10 @@ function sendConnectDeny(targetAddress, selfInfo) {
 }
 
 // End a live session — tells the other side to tear down cleanly and go idle.
+// `reason` distinguishes a deliberate disconnect from a host-side failure so
+// the controller can explain what actually happened.
 function sendConnectBye(targetAddress, selfInfo) {
-  sendUnicast(targetAddress, { type: MSG_BYE, from: selfInfo.name });
+  sendUnicast(targetAddress, { type: MSG_BYE, from: selfInfo.name, reason: selfInfo.reason });
 }
 
 // Register callbacks for incoming signalling messages.
@@ -188,7 +190,7 @@ function startListening(onHost, onLost) {
     }
     if (data.type === MSG_BYE) {
       if (typeof _onBye === 'function') {
-        _onBye({ name: data.from, address: rinfo.address });
+        _onBye({ name: data.from, address: rinfo.address, reason: data.reason });
       }
       return;
     }
