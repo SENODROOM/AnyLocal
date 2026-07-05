@@ -125,10 +125,25 @@ function listPythonTags() {
 // The caller appends the script + mode args and tries the next entry if one
 // exits immediately (e.g. a broken interpreter with missing deps).
 function pythonLaunchCommands() {
-  if (process.platform !== 'win32') {
-    return [{ cmd: 'python3', pre: [] }, { cmd: 'python', pre: [] }];
-  }
   const cmds = [];
+  // A project virtualenv is where the sidecar deps (mss/pynput/Pillow) actually
+  // live in dev — global interpreters usually don't have them, and picking one
+  // of those makes the sidecar crash on import and kills the session right
+  // after it connects. Always try the venv first.
+  const venvPy = process.platform === 'win32'
+    ? ['Scripts', 'python.exe']
+    : ['bin', 'python'];
+  for (const root of [
+    path.join(__dirname, '..', '.venv'),
+    path.join(__dirname, '..', 'python-sidecar', '.venv'),
+  ]) {
+    const py = path.join(root, ...venvPy);
+    if (fs.existsSync(py)) cmds.push({ cmd: py, pre: [] });
+  }
+  if (process.platform !== 'win32') {
+    cmds.push({ cmd: 'python3', pre: [] }, { cmd: 'python', pre: [] });
+    return cmds;
+  }
   for (const tag of listPythonTags()) cmds.push({ cmd: 'py', pre: [`-${tag}`] });
   cmds.push({ cmd: 'python', pre: [] });      // PATH python (non-freethreaded, hopefully)
   cmds.push({ cmd: 'py', pre: ['-3'] });      // last resort: launcher default
